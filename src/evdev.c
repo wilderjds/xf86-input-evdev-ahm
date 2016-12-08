@@ -534,7 +534,9 @@ AhmStep1(InputInfoPtr pInfo, struct input_event *ev, int value){
     pEvdev->ahmDelayedKeys = 0;
     if( (value == 0) && (code == ahmDelayedCode[0]) ){
       /* Gist of ahmDelay. */
+      pEvdev->transModFreeze[ahmDelayedCode[0]] = 1;
       AhmStep2(pInfo, ev, 1, code);
+      pEvdev->transModFreeze[ahmDelayedCode[0]] = 1;
       AhmStep2(pInfo, ev, 0, code);
       AhmStep2(pInfo, ev, 1, ahmDelayedCode[1]);
     }else{
