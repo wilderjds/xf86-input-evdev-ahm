@@ -518,7 +518,9 @@ AhmStep1(InputInfoPtr pInfo, struct input_event *ev, int value){
   case 1:
     if(value == 0){
       /* Release. Replay it. */
+      pEvdev->transModFreeze[ahmDelayedCode[0]] = 1;
       AhmStep2(pInfo, ev, 1, ahmDelayedCode[0]);
+      pEvdev->transModFreeze[ahmDelayedCode[0]] = 1;
 
       AhmStep2(pInfo, ev, 0, code);
       pEvdev->ahmDelayedKeys = 0;
