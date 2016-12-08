@@ -37,6 +37,7 @@
 
 #include <linux/input.h>
 #include <linux/types.h>
+#include <sys/time.h>
 
 #include <xorg-server.h>
 #include <xf86Xinput.h>
@@ -98,6 +99,13 @@
 
 #ifndef MAX_VALUATORS
 #define MAX_VALUATORS 36
+#endif
+
+#define AHM_QUEUE_SIZE 256
+
+/* If we're not using GNU C, nuke __attribute__ */
+#ifndef __GNUC__
+#  define  __attribute__(x)  /*NOTHING*/
 #endif
 
 #ifndef XI_PROP_DEVICE_NODE
@@ -188,6 +196,33 @@ typedef struct {
 
     unsigned int abs_queued, rel_queued, prox_queued;
 
+  /* ahm variables */
+  int                 lastPressCode;
+  int                 lastValue;
+  unsigned int        transModTable[256]; /* [orig keycode] means translated keycode */
+  int                 transModCount[256]; /* records how many times fold the translated key is pressed */
+  unsigned int        transModFreeze[256]; /* 1 means temporarily transmod is frozen. */
+
+  int                 ahmTimeout;
+  struct timeval      lastEventTime;
+
+  int                 ahmDelayTable[256];
+  int                 ahmDelayedCode[2];
+  int                 ahmDelayedKeys;
+  int                 ahmResetTime;
+
+  int                 ahmFreezeTT;
+
+  /* queuing variables */
+  int                 ahmPaddingInterval;
+  Time                ahmTimerExpires;
+  int                 ahmQueueKeys[AHM_QUEUE_SIZE];
+  int                 ahmQueueValues[AHM_QUEUE_SIZE];
+  int                 ahmQueueTop; /* Dispatch from here */
+  int                 ahmQueueBottom; /* Queue from here */
+
+  /* end of ahm variables */
+
     /* Middle mouse button emulation */
     struct {
         BOOL                enabled;
@@ -259,7 +294,11 @@ typedef struct {
 } EvdevRec, *EvdevPtr;
 
 /* Event posting functions */
-void EvdevQueueKbdEvent(InputInfoPtr pInfo, struct input_event *ev, int value);
+/*
+ * ahm changed the type. originally:
+ * void EvdevQueueKbdEvent(InputInfoPtr pInfo, struct input_event *ev, int value);
+ */
+int EvdevQueueKbdEvent(InputInfoPtr pInfo, struct input_event *ev, int value);
 void EvdevQueueButtonEvent(InputInfoPtr pInfo, int button, int value);
 void EvdevQueueProximityEvent(InputInfoPtr pInfo, int value);
 void EvdevQueueTouchEvent(InputInfoPtr pInfo, unsigned int touch,
