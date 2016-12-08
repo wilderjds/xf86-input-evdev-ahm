@@ -127,6 +127,8 @@ static Atom prop_device;
 static Atom prop_virtual;
 static Atom prop_scroll_dist;
 
+static InputInfoPtr ahmLastEventDevice;
+
 static int EvdevSwitchMode(ClientPtr client, DeviceIntPtr device, int mode)
 {
     InputInfoPtr pInfo;
@@ -274,23 +276,359 @@ EvdevNextInQueue(InputInfoPtr pInfo)
     return &pEvdev->queue[pEvdev->num_queue - 1];
 }
 
-void
+/*
+ * Returns 0 on failure, 1 on success.
+ * In the original, upstream code, it's a void function.
+ */
+int
 EvdevQueueKbdEvent(InputInfoPtr pInfo, struct input_event *ev, int value)
 {
     int code = ev->code + MIN_KEYCODE;
     EventQueuePtr pQueue;
 
-    /* Filter all repeated events from device.
-       We'll do softrepeat in the server, but only since 1.6 */
-    if (value == 2)
-        return;
+  /* Filter all repeated events from device.
+     We'll do softrepeat in the server, but only since 1.6 */
+	  if (value == 2){
+	    return 1;
+	  }
 
-    if ((pQueue = EvdevNextInQueue(pInfo)))
-    {
-        pQueue->type = EV_QUEUE_KEY;
-        pQueue->detail.key = code;
-        pQueue->val = value;
+  if ((pQueue = EvdevNextInQueue(pInfo)))
+  {
+    pQueue->type = EV_QUEUE_KEY;
+    pQueue->detail.key = code;
+    pQueue->val = value;
+    return 1;
+  }
+  else{
+    return 0;
+  }
+}
+
+/*
+ * Inside of AhmStep2, the keycode is X value. Restore the linux/input.h
+ * value which EvdevQueueKbdEvent accepts.
+ */
+static int
+WrapEvdevQueueKbdEvent(InputInfoPtr pInfo, struct input_event *ev, int value, int code){
+  ev->code = code - MIN_KEYCODE;
+  return EvdevQueueKbdEvent(pInfo, ev, value);
+}
+
+/* If the transmod "orig" key is pressed long enough and thus
+   timed out, it returns 1. Otherwise 0 */
+static int ahmTimedOutP(long int lastSec, long int lastUsec, struct input_event *ev, int timeOut){
+
+  /* timeOut is not set */
+  if(timeOut == 0){
+    return 0;
+  }
+
+  if( (ev->time.tv_sec - lastSec) * 1000
+      + (ev->time.tv_usec - lastUsec) / 1000
+      > timeOut){
+    return 1;
+  }else{
+    return 0;
+  }
+}
+
+/*
+ * Handles transmod and timeout
+ * code is X code, i.e. ev->code + MIN_KEYCODE
+ */
+static void
+AhmStep2(InputInfoPtr pInfo, struct input_event *ev, int value, int code)
+{
+  EvdevPtr pEvdev = pInfo->private;
+
+  int lastPressCode;
+
+  unsigned int * transModTable = pEvdev->transModTable;
+  int * transModCount = pEvdev->transModCount;
+
+  lastPressCode = pEvdev->lastPressCode;
+
+  if(value == 1){
+    pEvdev->lastPressCode = code;
+  }
+
+  if((value == 0)
+     && transModTable[lastPressCode]
+     && (lastPressCode != code)
+     && transModTable[code]
+     && (pEvdev->lastValue == 1)
+     && pEvdev->ahmFreezeTT){
+    /* Implements AhmFreezeTT */
+    transModCount[transModTable[lastPressCode]]--;
+    if(transModCount[transModTable[lastPressCode]] <= 0){
+      WrapEvdevQueueKbdEvent(pInfo, ev, 0, transModTable[lastPressCode]);
     }
+    if(transModCount[transModTable[lastPressCode]] < 0){
+      /*
+       * Usually this doesn't happen, but not never, either.
+       * Thus in fact this line is necessary.
+       */
+      transModCount[transModTable[lastPressCode]] = 0;
+    }
+    WrapEvdevQueueKbdEvent(pInfo, ev, 1, lastPressCode);
+    pEvdev->transModFreeze[lastPressCode] = 1;
+
+    /* Treat the latest keycode as usual in the following. */
+  }
+
+  if(transModTable[code]){
+    if(pEvdev->transModFreeze[code] == 1){
+      /*
+       * When a freeze happens is explained above.
+       * If it's frozen, send the original key code.
+       */
+      WrapEvdevQueueKbdEvent(pInfo, ev, value, code);
+      pEvdev->transModFreeze[code] = 0;
+    }else{
+      /* Transmod, not frozen */
+
+      if(value == 1){
+	/* press */
+
+	/*
+	 * Role of transModCount: suppose both key a and b are translated
+	 * to left shift. Press a, b, and release b. Then it should be 'B'.
+	 * But without transModCount, first the shift would be released,
+	 * so lower b be emitted.
+	 */
+	transModCount[transModTable[code]]++;
+	WrapEvdevQueueKbdEvent(pInfo, ev, 1, transModTable[code]);
+      }else{
+	/* release */
+	transModCount[transModTable[code]]--;
+	if(transModCount[transModTable[code]] <= 0){
+	  WrapEvdevQueueKbdEvent(pInfo, ev, 0, transModTable[code]);
+	}
+	if(transModCount[transModTable[code]] < 0){
+	  /*
+	   * Usually this doesn't happen, but not never, either.
+	   * Thus in fact this line is necessary.
+	   */
+	  transModCount[transModTable[code]] = 0;
+	}
+
+	if((lastPressCode == code)
+	   && (ahmLastEventDevice == pInfo)
+	   && (ahmTimedOutP(pEvdev->lastEventTime.tv_sec,
+			    pEvdev->lastEventTime.tv_usec,
+			    ev, pEvdev->ahmTimeout) == 0)
+	   ){
+	  /*
+	   * Simple press and release of a transMod key, so
+	   * send the original code.
+	   */
+	  WrapEvdevQueueKbdEvent(pInfo, ev, 1, code);
+	  WrapEvdevQueueKbdEvent(pInfo, ev, 0, code);
+	}
+      }
+    }
+  }else{
+    /* Plain key */
+    if(value){
+      transModCount[code]++;
+      WrapEvdevQueueKbdEvent(pInfo, ev, 1, code);
+    }else{
+      transModCount[code]--;
+      if(transModCount[code] <= 0){
+	WrapEvdevQueueKbdEvent(pInfo, ev, 0, code);
+      }
+      if(transModCount[code] < 0){
+	/*
+	 * Usually this doesn't happen, but not never, either.
+	 * Thus in fact this line is necessary.
+	 */
+	transModCount[code] = 0;
+      }
+
+    }
+  }
+  pEvdev->lastValue = value;
+  ahmLastEventDevice = pInfo;
+}
+
+/* Handles reset and ahmDelay before AhmStep2 */
+static void
+AhmStep1(InputInfoPtr pInfo, struct input_event *ev, int value){
+  /*
+   * Meaning of ev->code is described in linux/input.h, "Keys and buttons"
+   * section.
+   * code + MIN_KEYCODE is the value used by X, listed in
+   * /usr/share/X11/xkb/keycodes/evdev.
+   *
+   * Meaning of value: 0: release, 1: press, 2: autorepeat.
+   * Notice that autorepeat is _sent by kernel input driver_. Don't
+   * confuse it with X server autorepeat which is set by xset command.
+   */
+  int code = ev->code + MIN_KEYCODE;
+  EvdevPtr pEvdev = pInfo->private;
+
+  int* ahmDelayedCode = pEvdev->ahmDelayedCode;
+
+  /*
+   * Autorepeat has to be filtered for ahm, too.
+   * See also the comment in EvdevQueueKbdEvent.
+   * Early return will also be implemented in upstream 2.7.0.
+   */
+  if(value == 2){
+    return;
+  }
+
+  /* Reset part */
+  if (pEvdev->ahmResetTime &&
+      (ev->time.tv_sec - pEvdev->lastEventTime.tv_sec >
+       pEvdev->ahmResetTime)){
+    /*
+     * (more than) ahmResetTime (sec) has elapsed since the last press event.
+     * Release all translated modifiers, and reset transModCount and
+     * freeze table.
+     */
+    int c;
+    for(c = MIN_KEYCODE; c < 256; c++){
+
+      if(pEvdev->transModTable[c]){
+	/*
+	 * I think release of transModTable[c] suffices,
+	 * and release of c is not necessary.
+	 */
+	WrapEvdevQueueKbdEvent(pInfo, ev, 0, pEvdev->transModTable[c]);
+      }
+      pEvdev->transModCount[c] = 0;
+      pEvdev->transModFreeze[c] = 0;
+    }
+    pEvdev->ahmDelayedKeys = 0;
+  }
+
+  /* Delay part. */
+
+  /* How many keys are already delayed? */
+  switch(pEvdev->ahmDelayedKeys){
+  case 0:
+    if(pEvdev->ahmDelayTable[code] && value){
+      ahmDelayedCode[0] = code;
+      pEvdev->ahmDelayedKeys = 1;
+    }else{
+      AhmStep2(pInfo, ev, value, code);
+    }
+    break;
+  case 1:
+    if(value == 0){
+      /* Release. Replay it. */
+      AhmStep2(pInfo, ev, 1, ahmDelayedCode[0]);
+
+      AhmStep2(pInfo, ev, 0, code);
+      pEvdev->ahmDelayedKeys = 0;
+    }else{
+      /* Another key is pressed. Queue this second event, too.*/
+      ahmDelayedCode[1] = code;
+      pEvdev->ahmDelayedKeys = 2;
+    }
+    break;
+  case 2:
+    pEvdev->ahmDelayedKeys = 0;
+    if( (value == 0) && (code == ahmDelayedCode[0]) ){
+      /* Gist of ahmDelay. */
+      AhmStep2(pInfo, ev, 1, code);
+      AhmStep2(pInfo, ev, 0, code);
+      AhmStep2(pInfo, ev, 1, ahmDelayedCode[1]);
+    }else{
+      /* Nothing special. Replay all, and bye. */
+      AhmStep2(pInfo, ev, 1, ahmDelayedCode[0]);
+      AhmStep2(pInfo, ev, 1, ahmDelayedCode[1]);
+      AhmStep2(pInfo, ev, value, code);
+    }
+    break;
+  }
+  pEvdev->lastEventTime.tv_sec  = ev->time.tv_sec;
+  pEvdev->lastEventTime.tv_usec = ev->time.tv_usec;
+}
+
+/*
+ * (ahm) I don't know the exact spec of RegisterBlockAndWakeupHandlers.
+ * I merely guessed it from emuMB.c which is also a part of
+ * xf86-input-evdev.
+ */
+
+/*
+ * Really send queued key events, implementing AhmPaddingInterval.
+ *
+ * This function is called using timer. If padding is necessary,
+ * postpone these events.
+ *
+ * Simple sleeping doesn't work; it simply blocks.
+ */
+static void AhmWakeupHandler(pointer data, __attribute__ ((unused)) int ii,
+		      pointer __attribute__ ((unused)) LastSelectMask){
+  InputInfoPtr pInfo = (InputInfoPtr) data;
+  EvdevPtr  pEvdev = (EvdevPtr) pInfo->private;
+  int ms;
+
+  if(pEvdev->ahmQueueTop != pEvdev->ahmQueueBottom){
+    ms = pEvdev->ahmTimerExpires - GetTimeInMillis();
+    if(ms <= 0){
+      int i, lim;
+      unsigned int lastKey = 0;
+
+      lim = (pEvdev->ahmQueueTop < pEvdev->ahmQueueBottom) ?
+        pEvdev->ahmQueueBottom : pEvdev->ahmQueueBottom + AHM_QUEUE_SIZE;
+
+      for (i = pEvdev->ahmQueueTop; i < lim; i++){
+	if((pEvdev->transModTable[pEvdev->ahmQueueKeys[i % AHM_QUEUE_SIZE]]
+	    == lastKey) && lastKey){
+          pEvdev->ahmTimerExpires = GetTimeInMillis() +
+	    pEvdev->ahmPaddingInterval;
+	  break;
+	}else
+	  xf86PostKeyboardEvent(pInfo->dev,
+				pEvdev->ahmQueueKeys[i % AHM_QUEUE_SIZE],
+				pEvdev->ahmQueueValues[i % AHM_QUEUE_SIZE]);
+	lastKey = pEvdev->ahmQueueKeys[i % AHM_QUEUE_SIZE];
+      }
+      pEvdev->ahmQueueTop = i % AHM_QUEUE_SIZE;
+    }
+  }
+}
+
+
+static void AhmBlockHandler(pointer data,
+		     struct timeval **waitTime,
+		     __attribute__ ((unused)) pointer LastSelectMask)
+{
+  InputInfoPtr    pInfo = (InputInfoPtr) data;
+  EvdevPtr        pEvdev= (EvdevPtr) pInfo->private;
+  int             ms;
+
+  if(pEvdev->ahmQueueBottom != pEvdev->ahmQueueTop){
+    ms = pEvdev->ahmTimerExpires - GetTimeInMillis();
+    if(ms <= 0){
+      ms = 0;
+    }
+    AdjustWaitForDelay(waitTime, ms);
+  }
+}
+
+static void AhmRegisterTimers(InputInfoPtr pInfo){
+  EvdevPtr        pEvdev= (EvdevPtr) pInfo->private;
+  if(!pEvdev->flags & EVDEV_KEYBOARD_EVENTS){
+    return;
+  }
+  RegisterBlockAndWakeupHandlers(AhmBlockHandler,
+				 AhmWakeupHandler,
+				 (pointer)pInfo);
+}
+
+static void AhmFinalise(InputInfoPtr pInfo){
+  EvdevPtr        pEvdev= (EvdevPtr) pInfo->private;
+  if(!pEvdev->flags & EVDEV_KEYBOARD_EVENTS){
+    return;
+  }
+  RemoveBlockAndWakeupHandlers(AhmBlockHandler,
+			       AhmWakeupHandler,
+			       (pointer)pInfo);
 }
 
 void
@@ -304,6 +642,7 @@ EvdevQueueButtonEvent(InputInfoPtr pInfo, int button, int value)
         pQueue->detail.key = button;
         pQueue->val = value;
     }
+    ahmLastEventDevice = pInfo;
 }
 
 void
@@ -598,7 +937,7 @@ EvdevProcessButtonEvent(InputInfoPtr pInfo, struct input_event *ev)
     if (button)
         EvdevQueueButtonEvent(pInfo, button, value);
     else
-        EvdevQueueKbdEvent(pInfo, ev, value);
+        AhmStep1(pInfo, ev, value);
 }
 
 /**
@@ -919,13 +1258,24 @@ static void EvdevPostQueuedEvents(InputInfoPtr pInfo)
 {
     int i;
     EvdevPtr pEvdev = pInfo->private;
+    int ind = pEvdev->ahmQueueBottom;
 
     for (i = 0; i < pEvdev->num_queue; i++) {
         switch (pEvdev->queue[i].type) {
         case EV_QUEUE_KEY:
-            xf86PostKeyboardEvent(pInfo->dev, pEvdev->queue[i].detail.key,
-                                  pEvdev->queue[i].val);
-            break;
+	  /*
+	   * ahm:
+	   * In the original code, these key events are
+	   * dispatched with xf86PostKeyboardEvent here.
+	   * In ahm, they're queued, and sent asynchronously using timer.
+	   * Actual flushing is done in AhmWakeupHandler.
+	   */
+	  pEvdev->ahmQueueKeys[ind] = pEvdev->queue[i].detail.key;
+	  pEvdev->ahmQueueValues[ind] = pEvdev->queue[i].val;
+	  ind++;
+	  ind %= AHM_QUEUE_SIZE;
+	  break;
+
         case EV_QUEUE_BTN:
             if (Evdev3BEmuFilterEvent(pInfo,
                                       pEvdev->queue[i].detail.key,
@@ -948,6 +1298,10 @@ static void EvdevPostQueuedEvents(InputInfoPtr pInfo)
                                pEvdev->queue[i].touchMask);
             break;
         }
+    }
+    if(pEvdev->flags & EVDEV_KEYBOARD_EVENTS){
+      pEvdev->ahmTimerExpires = GetTimeInMillis();
+      pEvdev->ahmQueueBottom = ind;
     }
 }
 
@@ -1976,6 +2330,7 @@ EvdevOn(DeviceIntPtr device)
     xf86FlushInput(pInfo->fd);
     xf86AddEnabledDevice(pInfo);
     EvdevMBEmuOn(pInfo);
+    AhmRegisterTimers(pInfo);
     Evdev3BEmuOn(pInfo);
     pEvdev->flags |= EVDEV_INITIALIZED;
     device->public.on = TRUE;
@@ -2002,11 +2357,11 @@ EvdevProc(DeviceIntPtr device, int what)
         return EvdevOn(device);
 
     case DEVICE_OFF:
-        if (pEvdev->flags & EVDEV_INITIALIZED)
-        {
-            EvdevMBEmuFinalize(pInfo);
-            Evdev3BEmuFinalize(pInfo);
-        }
+      if (pEvdev->flags & EVDEV_INITIALIZED){
+	EvdevMBEmuFinalize(pInfo);
+	Evdev3BEmuFinalize(pInfo);
+	AhmFinalise(pInfo);
+      }
         if (pInfo->fd != -1)
         {
             EvdevGrabDevice(pInfo, 0, 1);
@@ -2656,6 +3011,118 @@ EvdevPreInit(InputDriverPtr drv, InputInfoPtr pInfo, int flags)
         EvdevWheelEmuPreInit(pInfo);
         EvdevDragLockPreInit(pInfo);
     }
+
+    if (pEvdev->flags & EVDEV_KEYBOARD_EVENTS)
+      {
+	/* parse ahm options */
+	char *str, *toFree;
+	char *next = NULL;
+	char *end = NULL;
+	int fromCode = 0, toCode = 0;
+
+	pEvdev->ahmQueueTop = 0;
+	pEvdev->ahmQueueBottom = 0;
+
+	pEvdev->lastPressCode = 0;
+	pEvdev->lastValue = 0;
+
+	for(fromCode = 0; fromCode < 256; fromCode++){
+	  pEvdev->transModCount[fromCode] = 0;
+	  pEvdev->transModTable[fromCode] = 0;
+	  pEvdev->transModFreeze[fromCode] = 0;
+	  pEvdev->ahmDelayTable[fromCode] = 0;
+	}
+
+	/* set timeout for ahm */
+	pEvdev->ahmTimeout = xf86SetIntOption(pInfo->options, "AhmTimeout", 600);
+	pEvdev->lastEventTime.tv_sec = 0;
+	pEvdev->lastEventTime.tv_usec = 0;
+
+	pEvdev->ahmDelayedKeys = 0;
+
+	pEvdev->ahmPaddingInterval = xf86SetIntOption(pInfo->options, "AhmPaddingInterval", 10);
+	/* Negative padding doesn't harm. */
+	pEvdev->ahmFreezeTT = xf86SetBoolOption(pInfo->options, "AhmFreezeTT", 1);
+
+	pEvdev->ahmResetTime = xf86SetIntOption(pInfo->options, "AhmResetTime", 10);
+
+	/* parse "transMod" option */
+	str = xf86CheckStrOption(pInfo->options, "TransMod",NULL);
+	if(str){
+	  xf86Msg(X_CONFIG, "Option \"TransMod\" \"%s\"\n", str);
+	  toFree = str;
+	  next = str;
+	  while(next != NULL){
+	    fromCode = strtol(next, &end, 10);
+	    if (next == end){
+	      break;
+	    }
+	    if (*end != ':'){
+	      xf86IDrvMsg(pInfo, X_ERROR, "TransMod : "
+		      "Dest keycode is lacking; colon expected: %s\n",
+		      str);
+	      break;
+	    }
+	    end++;
+	    next = end;
+	    toCode = strtol(next, &end, 10);
+	    if(next == end){
+	      xf86IDrvMsg(pInfo, X_ERROR, "TransMod : "
+		      "Dest keycode is lacking: %s\n",
+			  str);
+	    }
+	    next = end;
+	    /* xxx do range check, and store */
+	    xf86IDrvMsg(pInfo, X_CONFIG, "TransMod: %i -> %i\n",
+			fromCode, toCode);
+	    if((fromCode < MIN_KEYCODE) || (fromCode > 255)){
+	      xf86IDrvMsg(pInfo, X_ERROR, "TransMod : "
+			  "Keycode out of range: %i\n",
+			  fromCode);
+	      continue;
+	    }
+	    /* dest keycode has to be <= 255, due to X limit. */
+	    if((toCode < MIN_KEYCODE) || (toCode > 255)){
+	      xf86IDrvMsg(pInfo, X_ERROR, "TransMod : "
+			  "Keycode out of range: %i\n",
+			  toCode);
+	      continue;
+	    }
+	    pEvdev->transModTable[fromCode] = toCode;
+	  }
+	  free(toFree);
+	}
+
+	/* parse option "AhmDelay" */
+	str = xf86CheckStrOption(pInfo->options, "AhmDelay", NULL);
+	if(str){
+	  xf86Msg(X_CONFIG, "Option \"AhmDelay\" \"%s\"\n", str);
+	  toFree = str;
+	  next = str;
+	  while(next != NULL){
+	    fromCode = strtol(next, &end, 10);
+	    if (next == end){
+	      break;
+	    }
+	    next = end;
+
+	    /* do range check, and store */
+	    if((fromCode < MIN_KEYCODE) || (fromCode > 255)){
+	      xf86IDrvMsg(pInfo, X_ERROR, "AhmDelay : "
+			  "Keycode out of range: %i\n",
+			  fromCode);
+	      continue;
+	    }
+	    if(pEvdev->transModTable[fromCode] == 0){
+	      xf86IDrvMsg(pInfo, X_WARNING, "warning: Delay key %i is not a transmod.\n", fromCode);
+	    }
+	    pEvdev->ahmDelayTable[fromCode] = 1;
+	  }
+	  free(toFree);
+	}
+
+	/* end of parsing ahm options */
+      }
 
     return Success;
 
