@@ -208,6 +208,7 @@ typedef struct {
 
   int                 ahmDelayTable[256];
   int                 ahmDelayedCode[2];
+  int                 ahmDownKey[256];
   int                 ahmDelayedKeys;
   int                 ahmResetTime;
 

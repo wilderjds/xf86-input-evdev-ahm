@@ -448,6 +448,7 @@ AhmStep2(InputInfoPtr pInfo, struct input_event *ev, int value, int code)
     }
   }
   pEvdev->lastValue = value;
+  pEvdev->ahmDownKey[code] = value;
   ahmLastEventDevice = pInfo;
 }
 
@@ -3042,10 +3043,12 @@ EvdevPreInit(InputDriverPtr drv, InputInfoPtr pInfo, int flags)
 	pEvdev->lastValue = 0;
 
 	for(fromCode = 0; fromCode < 256; fromCode++){
+	  /* Reset state */
 	  pEvdev->transModCount[fromCode] = 0;
 	  pEvdev->transModTable[fromCode] = 0;
 	  pEvdev->transModFreeze[fromCode] = 0;
 	  pEvdev->ahmDelayTable[fromCode] = 0;
+	  pEvdev->ahmDownKey[fromCode] = 0;
 	}
 
 	/* set timeout for ahm */
