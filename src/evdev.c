@@ -915,7 +915,7 @@ EvdevPostProximityEvents(InputInfoPtr pInfo, int which)
                 break;
             case EV_QUEUE_PROXIMITY:
                 if (pEvdev->queue[i].val == which)
-                    xf86PostProximityEvent(pInfo->dev, which, 0, 0);
+                    xf86PostProximityEventM(pInfo->dev, which, pEvdev->old_vals);
                 break;
         }
     }
