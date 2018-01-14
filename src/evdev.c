@@ -2353,8 +2353,10 @@ EvdevProbe(InputInfoPtr pInfo)
             pInfo->type_name = XI_TOUCHSCREEN;
 	} else {
             if (!libevdev_has_event_code(pEvdev->dev, EV_REL, REL_X) ||
-                !libevdev_has_event_code(pEvdev->dev, EV_REL, REL_Y))
+                !libevdev_has_event_code(pEvdev->dev, EV_REL, REL_Y)) {
+                pEvdev->flags |= EVDEV_RELATIVE_EVENTS;
                 EvdevForceXY(pInfo, Relative);
+            }
 	    xf86IDrvMsg(pInfo, X_INFO, "Configuring as mouse\n");
 	    pInfo->type_name = XI_MOUSE;
 	}
