@@ -2487,7 +2487,7 @@ EvdevOpenDevice(InputInfoPtr pInfo)
     }
 
     if (pInfo->fd < 0) {
-        xf86IDrvMsg(pInfo, X_ERROR, "Unable to open evdev device \"%s\".\n", device);
+        xf86IDrvMsg(pInfo, X_ERROR, "Unable to open evdev device \"%s\" (%s).\n", device, strerror(errno));
         return BadValue;
     }
 
