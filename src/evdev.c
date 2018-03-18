@@ -509,6 +509,13 @@ AhmStep1(InputInfoPtr pInfo, struct input_event *ev, int value){
   /* How many keys are already delayed? */
   switch(pEvdev->ahmDelayedKeys){
   case 0:
+      if (( value == 1) && (code == 64 && pEvdev->ahmDownKey[108])) {
+	  /* HARDCODED SHIT! for now test if it works */
+	  /* The left alt key has bene pressed with the right alt key down: freeze */
+	  pEvdev->transModFreeze[code] = 1;
+	  AhmStep2(pInfo, ev, value, code);
+	  pEvdev->transModFreeze[code] = 1;
+      } else
     if(pEvdev->ahmDelayTable[code] && value){
       ahmDelayedCode[0] = code;
       pEvdev->ahmDelayedKeys = 1;
