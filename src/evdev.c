@@ -551,6 +551,16 @@ EvdevProcessProximityState(InputInfoPtr pInfo)
         }
     }
 
+    /* Wacom's last frame resets all values to 0, including x/y.
+       Skip over this. */
+    if (prox_state == 0) {
+        int v;
+        if (valuator_mask_fetch(pEvdev->abs_vals, 0, &v) && v == 0)
+            valuator_mask_unset(pEvdev->abs_vals, 0);
+        if (valuator_mask_fetch(pEvdev->abs_vals, 1, &v) && v == 0)
+            valuator_mask_unset(pEvdev->abs_vals, 1);
+    }
+
     if ((prox_state && !pEvdev->in_proximity) ||
         (!prox_state && pEvdev->in_proximity))
     {
